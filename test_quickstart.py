@@ -13,6 +13,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 RESULTS = {}
 
 
+def pytest_approx(expected, rel=1e-6):
+    """Lightweight approximate comparison."""
+    class Approx:
+        def __eq__(self, actual):
+            return abs(actual - expected) <= rel * abs(expected)
+    return Approx()
+
+
 def test(name: str):
     def decorator(fn):
         try:
@@ -113,11 +121,12 @@ def test_anomaly():
     assert isinstance(detected, bool)
 
 
-@test("Driver monitoring CNN")
+@test("Driver monitoring CNN + Bayesian HRV")
 def test_driver():
-    from services.driver_monitoring.main import CNNFatigueDetector, BayesianFatigueFilter
+    from services.driver_monitoring.main import CNNFatigueDetector, BayesianHRVFilter
     from shared.schemas.models import DriverVisionSignal, DriverPhysiologicalSignal
     from datetime import datetime
+
     cnn = CNNFatigueDetector()
     vision = DriverVisionSignal(
         driver_id="DR0001", vehicle_id="VH0001", timestamp=datetime.utcnow(),
@@ -127,34 +136,35 @@ def test_driver():
     scores = cnn.predict(vision)
     assert 0.0 <= scores["fatigue_probability"] <= 1.0
 
-    bf = BayesianFatigueFilter()
+    bf = BayesianHRVFilter()
     physio = DriverPhysiologicalSignal(
         driver_id="DR0001", timestamp=datetime.utcnow(),
         heart_rate_bpm=75, hrv_ms=55, skin_conductance_us=3.0, stress_index=0.3,
     )
-    fatigue = bf.update(physio)
-    assert 0.0 <= fatigue <= 1.0
+    result = bf.update(physio)
+    assert 0.0 <= result["fatigue_probability"] <= 1.0
 
 
 @test("Routing GNN optimizer")
 def test_routing():
-    from services.routing_engine.main import GNNRouteOptimizer, SAMPLE_NODES, SAMPLE_EDGES
-    optimizer = GNNRouteOptimizer()
-    route, costs = optimizer.optimize_route(
-        origin="HUB_NYC", destination="HUB_RIC",
-        graph_nodes=SAMPLE_NODES, graph_edges=SAMPLE_EDGES,
-    )
-    assert len(route) >= 2
-    assert route[0] == "HUB_NYC"
-    assert route[-1] == "HUB_RIC"
+    from services.routing_engine.main import GNNPathOptimiser, LogisticsGraph
+    graph = LogisticsGraph()
+    optimizer = GNNPathOptimiser(graph)
+    result = optimizer.find_optimal_route("HUB_DALLAS", "HUB_HOUSTON")
+    assert len(result["route"]) >= 2
+    assert result["route"][0] == "HUB_DALLAS"
+    assert result["route"][-1] == "HUB_HOUSTON"
 
 
 @test("Supply chain Transformer")
 def test_supply_chain():
     from services.supply_chain.main import MultivariateTransformerForecaster
     forecaster = MultivariateTransformerForecaster()
-    events = [{"delay_hours": 12, "disruption_flag": True, "severity": 2, "tier": 2}]
-    result = forecaster.forecast_disruption(events, lane_type="ocean")
+    result = forecaster.predict_delay(
+        supplier_id="SUP001", tier=1, lane_type="ocean",
+        current_lead_time_days=10.0, weather_index=0.3,
+        port_congestion_index=0.4, vessel_schedule_risk=0.2,
+    )
     assert 0.0 <= result["delay_probability"] <= 1.0
 
 
@@ -198,19 +208,10 @@ def test_audit():
     h0 = compute_event_hash({"event": "GENESIS"}, "")
     h1 = compute_event_hash({"event": "LOAD_ASSIGNMENT"}, h0)
     h2 = compute_event_hash({"event": "HOS_LOG"}, h1)
-    # Tamper detection: changing h1 should change h2
     h1_tampered = compute_event_hash({"event": "LOAD_ASSIGNMENT_TAMPERED"}, h0)
     h2_valid = compute_event_hash({"event": "HOS_LOG"}, h1)
     h2_broken = compute_event_hash({"event": "HOS_LOG"}, h1_tampered)
     assert h2_valid != h2_broken  # Tamper detected!
-
-
-def pytest_approx(expected, rel=1e-6):
-    """Lightweight approximate comparison."""
-    class Approx:
-        def __eq__(self, actual):
-            return abs(actual - expected) <= rel * abs(expected)
-    return Approx()
 
 
 if __name__ == "__main__":

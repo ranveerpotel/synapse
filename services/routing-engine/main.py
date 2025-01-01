@@ -55,7 +55,7 @@ class LogisticsGraph:
             self.nodes[nid] = RouteNode(
                 node_id=nid, node_type=ntype, latitude=lat, longitude=lon, name=nid
             )
-        for (a, _, la, lo_a, _), (b, _, lb, lo_b, _) in [
+        for (a, la, lo_a, _), (b, lb, lo_b, _) in [
             (hub_positions[i], hub_positions[j])
             for i in range(len(hub_positions))
             for j in range(i+1, len(hub_positions))

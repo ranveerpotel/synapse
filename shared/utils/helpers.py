@@ -1,7 +1,7 @@
-"""SYNAPSE Shared Utilities - Kafka, Redis, Prometheus, HOS compliance."""
+"""SYNAPSE Shared Utilities - Kafka, Redis, Prometheus, HOS compliance, Auth."""
 from __future__ import annotations
 import asyncio, hashlib, json, time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, AsyncGenerator, Optional
 import redis.asyncio as aioredis
 import structlog
@@ -101,3 +101,107 @@ def check_hos_compliance(driving_h: float, on_duty_h: float, weekly_h: float) ->
         "remaining_duty_hours": max(0.0, 14.0 - on_duty_h),
         "remaining_weekly_hours": max(0.0, 70.0 - weekly_h),
     }
+
+
+# ── Alternate Kafka interfaces (used by newer services) ───────────────────────
+
+class KafkaPublisher:
+    """Async Kafka producer with simple publish() interface."""
+
+    def __init__(self, bootstrap_servers: str):
+        self._client = KafkaProducerClient(bootstrap_servers, "synapse")
+
+    async def start(self):
+        await self._client.start()
+
+    async def stop(self):
+        await self._client.stop()
+
+    async def publish(self, topic: str, value: dict, key: Optional[str] = None):
+        await self._client.send(topic, value, key=key)
+
+
+class KafkaSubscriber:
+    """Async Kafka consumer with async messages() generator interface."""
+
+    def __init__(self, topics: list[str], group_id: str):
+        from shared.config.settings import get_settings
+        settings = get_settings()
+        self._client = KafkaConsumerClient(
+            settings.kafka_bootstrap, topics, group_id, group_id
+        )
+
+    async def start(self):
+        await self._client.start()
+
+    async def stop(self):
+        await self._client.stop()
+
+    async def messages(self) -> AsyncGenerator[dict, None]:
+        async for msg in self._client.consume():
+            yield msg
+
+
+# ── Redis cache alias ─────────────────────────────────────────────────────────
+
+class SynapseCache(RedisClient):
+    """Redis-backed cache used by newer services (alias for RedisClient)."""
+    pass
+
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+
+def configure_logging(service_name: str) -> None:
+    """Configure structlog for the given service."""
+    structlog.configure(
+        processors=[
+            structlog.stdlib.add_log_level,
+            structlog.stdlib.add_logger_name,
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.StackInfoRenderer(),
+            structlog.dev.ConsoleRenderer() if True else structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.BoundLogger,
+        context_class=dict,
+        logger_factory=structlog.PrintLoggerFactory(),
+    )
+
+
+# ── JWT Auth ──────────────────────────────────────────────────────────────────
+
+def create_access_token(data: dict) -> str:
+    """Create a signed JWT access token."""
+    from shared.config.settings import get_settings
+    settings = get_settings()
+    try:
+        from jose import jwt
+        payload = dict(data)
+        payload["exp"] = datetime.utcnow() + timedelta(minutes=settings.jwt_expire_minutes)
+        return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+    except ImportError:
+        import base64
+        encoded = base64.urlsafe_b64encode(json.dumps(data).encode()).decode()
+        sig = hashlib.sha256((encoded + settings.jwt_secret).encode()).hexdigest()[:16]
+        return f"{encoded}.{sig}"
+
+
+def verify_token(token: str) -> dict:
+    """Verify a JWT token and return the payload claims."""
+    from shared.config.settings import get_settings
+    settings = get_settings()
+    try:
+        from jose import jwt, JWTError
+        claims = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+        return dict(claims)
+    except ImportError:
+        import base64
+        parts = token.rsplit(".", 1)
+        if len(parts) != 2:
+            raise ValueError("Invalid token format")
+        encoded, sig = parts
+        expected = hashlib.sha256((encoded + settings.jwt_secret).encode()).hexdigest()[:16]
+        if sig != expected:
+            raise ValueError("Invalid token signature")
+        return json.loads(base64.urlsafe_b64decode(encoded + "==").decode())
+    except Exception as exc:
+        raise ValueError(f"Token verification failed: {exc}") from exc
