@@ -1,0 +1,266 @@
+# SYNAPSE Kubernetes Helm Values
+# Production-grade deployment configuration
+# Apply: helm upgrade --install synapse ./infrastructure/kubernetes -f values.yaml
+
+global:
+  imageRegistry: "your-registry.example.com/synapse"
+  imageTag: "1.0.0"
+  pullPolicy: "IfNotPresent"
+  environment: "production"
+
+# ── Infrastructure ────────────────────────────────────────────────────────────
+
+kafka:
+  enabled: true
+  replicaCount: 3
+  partitions: 500
+  replicationFactor: 3
+  retentionMs: 604800000   # 7 days
+  resources:
+    requests:
+      memory: "4Gi"
+      cpu: "2"
+    limits:
+      memory: "8Gi"
+      cpu: "4"
+
+timescaledb:
+  enabled: true
+  replicaCount: 1
+  primaryNode:
+    resources:
+      requests:
+        memory: "8Gi"
+        cpu: "4"
+      limits:
+        memory: "16Gi"
+        cpu: "8"
+  persistence:
+    size: "500Gi"
+    storageClass: "premium-ssd"
+
+redis:
+  enabled: true
+  architecture: "replication"
+  auth:
+    enabled: true
+  master:
+    resources:
+      requests:
+        memory: "4Gi"
+        cpu: "1"
+
+# ── SYNAPSE Services ──────────────────────────────────────────────────────────
+
+services:
+  apiGateway:
+    replicaCount: 3
+    port: 8000
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "250m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+    hpa:
+      minReplicas: 2
+      maxReplicas: 10
+      targetCPUUtilizationPercentage: 70
+
+  telemetryIngestion:
+    replicaCount: 5
+    port: 8001
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "500m"
+      limits:
+        memory: "1Gi"
+        cpu: "1"
+    hpa:
+      minReplicas: 3
+      maxReplicas: 20
+      targetCPUUtilizationPercentage: 60
+
+  driverMonitoring:
+    replicaCount: 3
+    port: 8002
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "500m"
+      limits:
+        memory: "2Gi"
+        cpu: "2"
+
+  fleetHealth:
+    replicaCount: 3
+    port: 8003
+    resources:
+      requests:
+        memory: "2Gi"
+        cpu: "1"
+      limits:
+        memory: "4Gi"
+        cpu: "4"
+    # GPU node for LSTM inference
+    nodeSelector:
+      accelerator: "gpu"
+    tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+
+  routingEngine:
+    replicaCount: 3
+    port: 8004
+    grpcPort: 50051
+    resources:
+      requests:
+        memory: "2Gi"
+        cpu: "2"
+      limits:
+        memory: "4Gi"
+        cpu: "4"
+
+  supplyChain:
+    replicaCount: 2
+    port: 8005
+    resources:
+      requests:
+        memory: "2Gi"
+        cpu: "1"
+      limits:
+        memory: "4Gi"
+        cpu: "2"
+
+  insightFusion:
+    replicaCount: 3
+    port: 8006
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "500m"
+      limits:
+        memory: "2Gi"
+        cpu: "2"
+
+  modeDdr:
+    replicaCount: 3
+    port: 8007
+    resources:
+      requests:
+        memory: "4Gi"
+        cpu: "2"
+      limits:
+        memory: "8Gi"
+        cpu: "4"
+    # GPU node for RL inference
+    nodeSelector:
+      accelerator: "gpu"
+
+  actuation:
+    replicaCount: 3
+    port: 8008
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "250m"
+      limits:
+        memory: "1Gi"
+        cpu: "1"
+
+  digitalTwin:
+    replicaCount: 2
+    port: 8009
+    resources:
+      requests:
+        memory: "2Gi"
+        cpu: "2"
+      limits:
+        memory: "4Gi"
+        cpu: "4"
+
+  carbonReporting:
+    replicaCount: 2
+    port: 8010
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "250m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+
+  auditLedger:
+    replicaCount: 2
+    port: 8011
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "250m"
+      limits:
+        memory: "1Gi"
+        cpu: "500m"
+
+# ── Observability ─────────────────────────────────────────────────────────────
+
+monitoring:
+  prometheus:
+    enabled: true
+    retention: "30d"
+    storageSize: "50Gi"
+    scrapeInterval: "15s"
+
+  grafana:
+    enabled: true
+    adminPassword: "synapse-grafana-changeme"
+    dashboards:
+      - "synapse-fleet-health"
+      - "synapse-driver-safety"
+      - "synapse-mode-ddr"
+      - "synapse-carbon"
+      - "synapse-otp"
+
+  alertmanager:
+    enabled: true
+    receivers:
+      - name: "pagerduty"
+        type: "pagerduty"
+      - name: "slack"
+        type: "slack"
+
+# ── Security ──────────────────────────────────────────────────────────────────
+
+security:
+  networkPolicy:
+    enabled: true
+  podSecurityPolicy:
+    enabled: true
+  tls:
+    enabled: true
+    certManager: true
+
+keycloak:
+  enabled: true
+  realm: "synapse"
+  adminUser: "admin"
+
+# ── Ingress ───────────────────────────────────────────────────────────────────
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/rate-limit: "300"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  hosts:
+    - host: "synapse.yourcompany.com"
+      paths:
+        - path: "/"
+          pathType: "Prefix"
+  tls:
+    - secretName: "synapse-tls"
+      hosts:
+        - "synapse.yourcompany.com"

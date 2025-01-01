@@ -1,0 +1,179 @@
+version: '3.9'
+
+services:
+  # ── Infrastructure ──────────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: synapse
+      POSTGRES_USER: synapse
+      POSTGRES_PASSWORD: synapse_secret
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+      - ./infrastructure/docker/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U synapse"]
+      interval: 10s
+      retries: 5
+
+  redis:
+    image: redis:7.2-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 2gb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+
+  # ── SYNAPSE Services ─────────────────────────────────────────────
+  api-gateway:
+    build: ./services/api-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:29092
+      - REDIS_URL=redis://redis:6379
+    depends_on: [kafka, redis]
+
+  telemetry-ingestion:
+    build: ./services/telemetry-ingestion
+    ports:
+      - "8001:8001"
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:29092
+      - DB_URL=postgresql+asyncpg://synapse:synapse_secret@timescaledb/synapse
+    depends_on: [kafka, timescaledb]
+
+  driver-monitoring:
+    build: ./services/driver-monitoring
+    ports:
+      - "8002:8002"
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:29092
+      - REDIS_URL=redis://redis:6379
+    depends_on: [kafka, redis]
+
+  fleet-health:
+    build: ./services/fleet-health
+    ports:
+      - "8003:8003"
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:29092
+      - DB_URL=postgresql+asyncpg://synapse:synapse_secret@timescaledb/synapse
+      - REDIS_URL=redis://redis:6379
+    depends_on: [kafka, timescaledb, redis]
+
+  routing-engine:
+    build: ./services/routing-engine
+    ports:
+      - "8004:8004"
+      - "50051:50051"
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:29092
+      - REDIS_URL=redis://redis:6379
+    depends_on: [kafka, redis]
+
+  supply-chain:
+    build: ./services/supply-chain
+    ports:
+      - "8005:8005"
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:29092
+      - DB_URL=postgresql+asyncpg://synapse:synapse_secret@timescaledb/synapse
+    depends_on: [kafka, timescaledb]
+
+  insight-fusion:
+    build: ./services/insight-fusion
+    ports:
+      - "8006:8006"
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:29092
+      - REDIS_URL=redis://redis:6379
+      - FLEET_HEALTH_URL=http://fleet-health:8003
+      - DRIVER_URL=http://driver-monitoring:8002
+      - ROUTING_URL=http://routing-engine:8004
+      - SUPPLY_CHAIN_URL=http://supply-chain:8005
+    depends_on: [kafka, redis, fleet-health, driver-monitoring, routing-engine, supply-chain]
+
+  mode-ddr:
+    build: ./services/mode-ddr
+    ports:
+      - "8007:8007"
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:29092
+      - REDIS_URL=redis://redis:6379
+      - INSIGHT_FUSION_URL=http://insight-fusion:8006
+      - ACTUATION_URL=http://actuation:8008
+    depends_on: [kafka, redis, insight-fusion]
+
+  actuation:
+    build: ./services/actuation
+    ports:
+      - "8008:8008"
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:29092
+      - DB_URL=postgresql+asyncpg://synapse:synapse_secret@timescaledb/synapse
+      - REDIS_URL=redis://redis:6379
+    depends_on: [kafka, timescaledb, redis]
+
+  digital-twin:
+    build: ./services/digital-twin
+    ports:
+      - "8009:8009"
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:29092
+      - DB_URL=postgresql+asyncpg://synapse:synapse_secret@timescaledb/synapse
+    depends_on: [kafka, timescaledb]
+
+  carbon-reporting:
+    build: ./services/carbon-reporting
+    ports:
+      - "8010:8010"
+    environment:
+      - DB_URL=postgresql+asyncpg://synapse:synapse_secret@timescaledb/synapse
+    depends_on: [timescaledb]
+
+  audit-ledger:
+    build: ./services/audit-ledger
+    ports:
+      - "8011:8011"
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:29092
+      - DB_URL=postgresql+asyncpg://synapse:synapse_secret@timescaledb/synapse
+    depends_on: [kafka, timescaledb]
+
+volumes:
+  timescaledb_data:
